@@ -54,7 +54,12 @@ Measured on one unit: tjmax 100 C, default offset 8 (throttle at 92 C), PL1/PL2
 37/40 W. Lid open, the package sat at 84 to 85 C under load and peaked at 93 C with
 no event. Journals from lost boots contain no temperatures, so the temperature at
 which the EC raises the event and the one at which it stops are unknown.
-The default `hold-temp` of 85 C is conservative.
+With the guard active and the lid closed, the package held at 84 to 86 C (offset 16 to
+17, about 21 W) and the EC still raised the event three times in 7 minutes. A step
+down of the offset at 85 C was followed by an event 40 s later, and the machine lost
+power 3 minutes after the last event, 10 minutes after the first. So 85 C is not low
+enough with the lid closed, or package temperature is not the whole condition. The
+default `hold-temp` is 75 C, still a guess.
 
 To calibrate, log package temperature (1 s resolution around events), package
 power, and event timestamps. Needed:
@@ -66,9 +71,9 @@ power, and event timestamps. Needed:
 
 ## Usage
 
-Settings (defaults): `--hold-temp 85` C, `--step-up 2`, `--max-offset 30`,
-`--interval 4` s, `--settle 20` s, `--probe-interval 180` s (at least 60; longer
-than the EC's delay before it raises the event). `ux5406-guard restore` writes
+Settings (defaults): `--hold-temp 75` C, `--step-up 2`, `--max-offset 30`,
+`--interval 4` s, `--settle 20` s, `--probe-interval 600` s (at least 60; the
+walk-back is slow because a step down has provoked an event). `ux5406-guard restore` writes
 back a saved offset and exits.
 
 NixOS:

@@ -30,12 +30,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            hold_temp: 85,
+            hold_temp: 75,
             step_up: 2,
             max_offset: 30,
             interval: 4,
             settle: 20,
-            probe_interval: 180,
+            probe_interval: 600,
         }
     }
 }

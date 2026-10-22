@@ -24,14 +24,14 @@ in
     };
     holdTemp = mkOption {
       type = types.int;
-      default = 85;
+      default = 75;
       description = "Package temperature (C) the offset is raised to reach after an event. Not calibrated for this model; see the README.";
     };
     stepUp = mkOption { type = types.int; default = 2; description = "Degrees added per raise."; };
     maxOffset = mkOption { type = types.int; default = 30; description = "Largest offset the guard writes."; };
     interval = mkOption { type = types.int; default = 4; description = "Seconds between control steps."; };
     settle = mkOption { type = types.int; default = 20; description = "Seconds at or below holdTemp before the alert counts as cleared."; };
-    probeInterval = mkOption { type = types.int; default = 180; description = "Seconds without an event before the offset is lowered by one degree."; };
+    probeInterval = mkOption { type = types.int; default = 600; description = "Seconds without an event before the offset is lowered by one degree."; };
   };
 
   config = mkIf cfg.enable {

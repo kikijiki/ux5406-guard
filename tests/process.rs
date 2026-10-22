@@ -1,6 +1,6 @@
 mod common;
 
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -16,9 +16,16 @@ fn spawn(fake: &Fake) -> Child {
         .arg("--sys").arg(&fake.sys)
         .arg("--kmsg").arg(fake.kmsg())
         .arg("--state-dir").arg(fake.run_dir())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(File::create(fake.root.join("stderr")).unwrap()))
         .spawn()
         .unwrap()
+}
+
+/// Wait until the guard has opened the log at its end; an earlier event is not news.
+fn ready(fake: &Fake) {
+    wait_for("start", || {
+        fs::read_to_string(fake.root.join("stderr")).is_ok_and(|log| log.contains("watching"))
+    });
 }
 
 fn emit_event(fake: &Fake) {
@@ -56,7 +63,7 @@ fn wrong_product_exits_78_and_touches_nothing() {
 fn sigterm_restores_the_original_offset() {
     let fake = Fake::new("UX5406SA", 8, 99);
     let mut child = spawn(&fake);
-    sleep(Duration::from_millis(500)); // the log is opened at its end
+    ready(&fake);
     emit_event(&fake);
     wait_for("offset raised", || fake.offset() > 8);
     signal(&child, "TERM");
@@ -70,7 +77,7 @@ fn sigterm_restores_the_original_offset() {
 fn sigkill_leaves_a_note_and_restore_command_puts_the_offset_back() {
     let fake = Fake::new("UX5406SA", 8, 99);
     let mut child = spawn(&fake);
-    sleep(Duration::from_millis(500));
+    ready(&fake);
     emit_event(&fake);
     wait_for("offset raised", || fake.offset() > 8);
     signal(&child, "KILL");
@@ -91,6 +98,7 @@ fn events_older_than_the_start_are_ignored() {
     let fake = Fake::new("UX5406SA", 8, 99);
     emit_event(&fake);
     let mut child = spawn(&fake);
+    ready(&fake);
     sleep(Duration::from_millis(2500));
     assert_eq!(fake.offset(), 8);
     signal(&child, "TERM");
