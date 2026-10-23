@@ -8,12 +8,12 @@ It never sleeps, suspends, hibernates or powers off the machine.
 
 With the lid closed and the CPU hot, the EC raises a thermal warning that the
 kernel logs as `asus_wmi: Unknown key code 0x6d`. If the CPU stays hot the EC cuts
-power 1.5 to 2.5 minutes later, leaving no trace in the journal. Windows hibernates
+power about 3 minutes after the last event (180 to 182 s in three cuts recorded at 1 s resolution), leaving no trace in the journal. Windows hibernates
 on this event; Linux ignores it.
 
 Observations on one unit (BIOS UX5406SA.309, kernel 7.2): three power losses, each
 with AC connected, lid closed and a sustained all-core load (cargo and nvcc builds).
-The last event preceded the end of the journal by 1m34s to 2m17s. In one boot the
+The journal ends 1m34s to 2m17s after the last event, but journald lags the real cut; the fsynced recorder puts it at 180 to 182 s. In one boot the
 event fired six times, 4 to 6 minutes apart, without a loss, so it is a warning and
 not always fatal. The charge cap (80 %), the BIOS and the `ucsi_acpi ...
 GET_CURRENT_CAM command failed` message do not correlate with the losses; the
