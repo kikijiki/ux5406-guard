@@ -8,8 +8,8 @@ use std::path::PathBuf;
 pub enum Error {
     /// The machine is not the one this guard is for.
     WrongProduct { wanted: &'static str, found: String },
-    /// No `coretemp` package sensor below hwmon.
-    NoSensor,
+    /// No lid switch below `/proc/acpi/button/lid`.
+    NoLid,
     /// A file could not be read.
     Read { path: PathBuf, source: io::Error },
     /// A file could not be written.
@@ -24,7 +24,7 @@ impl Error {
     /// Exit status of the process: 78 (EX_CONFIG) means "do not restart me".
     pub fn exit_code(&self) -> i32 {
         match self {
-            Error::WrongProduct { .. } | Error::Usage(_) | Error::NoSensor => 78,
+            Error::WrongProduct { .. } | Error::Usage(_) | Error::NoLid => 78,
             _ => 1,
         }
     }
@@ -36,7 +36,7 @@ impl fmt::Display for Error {
             Error::WrongProduct { wanted, found } => {
                 write!(f, "refusing to run: product is {found:?}, not {wanted}")
             }
-            Error::NoSensor => write!(f, "no coretemp \"Package id 0\" sensor found"),
+            Error::NoLid => write!(f, "no lid switch found"),
             Error::Read { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Error::Write { path, source } => {
                 write!(f, "cannot write {}: {source}", path.display())

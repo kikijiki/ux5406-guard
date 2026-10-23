@@ -14,15 +14,15 @@ use ux5406_guard::kmsg::Kmsg;
 use ux5406_guard::service::{self, log, Note, Service};
 use ux5406_guard::sysfs::Machine;
 
-const USAGE: &str = "usage: ux5406-guard [run|restore] [--hold-temp C] [--step-up C] \
-[--max-offset C] [--interval S] [--settle S] [--probe-interval S] \
-[--state-dir DIR] [--sys DIR] [--kmsg FILE]";
+const USAGE: &str = "usage: ux5406-guard [run|restore] [--cap W] [--safe W] [--hold S] \
+[--state-dir DIR] [--sys DIR] [--proc DIR] [--kmsg FILE]";
 
 struct Options {
     restore: bool,
     config: Config,
     state_dir: PathBuf,
     sys: PathBuf,
+    proc: PathBuf,
     kmsg: PathBuf,
 }
 
@@ -33,6 +33,7 @@ fn parse() -> Result<Options, Error> {
         config: Config::default(),
         state_dir: "/run/ux5406-guard".into(),
         sys: "/sys".into(),
+        proc: "/proc".into(),
         kmsg: "/dev/kmsg".into(),
     };
     match args.peek().map(String::as_str) {
@@ -48,16 +49,13 @@ fn parse() -> Result<Options, Error> {
     while let Some(flag) = args.next() {
         let usage = || Error::Usage(format!("bad option {flag:?}\n{USAGE}"));
         let value = args.next().ok_or_else(usage)?;
-        let number = || value.parse::<i32>().map_err(|_| usage());
         match flag.as_str() {
-            "--hold-temp" => o.config.hold_temp = number()?,
-            "--step-up" => o.config.step_up = number()?,
-            "--max-offset" => o.config.max_offset = number()?,
-            "--interval" => o.config.interval = number()?,
-            "--settle" => o.config.settle = number()?,
-            "--probe-interval" => o.config.probe_interval = number()?,
+            "--cap" => o.config.cap_w = value.parse().map_err(|_| usage())?,
+            "--safe" => o.config.safe_w = value.parse().map_err(|_| usage())?,
+            "--hold" => o.config.hold = value.parse().map_err(|_| usage())?,
             "--state-dir" => o.state_dir = value.into(),
             "--sys" => o.sys = value.into(),
+            "--proc" => o.proc = value.into(),
             "--kmsg" => o.kmsg = value.into(),
             _ => return Err(usage()),
         }
@@ -67,12 +65,12 @@ fn parse() -> Result<Options, Error> {
 }
 
 fn run(o: Options) -> Result<(), Error> {
-    let machine = Machine::open(&o.sys)?;
+    let machine = Machine::open(&o.sys, &o.proc)?;
     let note = Note(service::note_path(&o.state_dir));
 
-    // A guard that was killed left its note: put that offset back first.
-    if let Some(base) = service::restore(&machine, &note)? {
-        log(&format!("a previous guard did not finish: offset back to {base}"));
+    // A guard that was killed left its note: put those limits back first.
+    if let Some((msr, mmio)) = service::restore(&machine, &note)? {
+        log(&format!("a previous guard did not finish: limits back to {msr} / {mmio} uW"));
     }
     if o.restore {
         return Ok(());
@@ -87,10 +85,8 @@ fn run(o: Options) -> Result<(), Error> {
     let mut service = Service::new(machine, note, o.config, events);
     let start = Instant::now();
     log(&format!(
-        "watching for the EC event; offset {}, hold temperature {} C, maximum offset {}",
-        service.machine.offset()?,
-        o.config.hold_temp,
-        o.config.max_offset
+        "watching for the EC event; cap {} W with the lid closed, {} W for {} s after an event",
+        o.config.cap_w, o.config.safe_w, o.config.hold
     ));
 
     let mut last_error = String::new();

@@ -12,8 +12,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_ux5406-guard");
 
 fn spawn(fake: &Fake) -> Child {
     Command::new(BIN)
-        .args(["run", "--interval", "1", "--settle", "2", "--probe-interval", "60"])
+        .args(["run", "--hold", "60"])
         .arg("--sys").arg(&fake.sys)
+        .arg("--proc").arg(&fake.proc)
         .arg("--kmsg").arg(fake.kmsg())
         .arg("--state-dir").arg(fake.run_dir())
         .stderr(Stdio::from(File::create(fake.root.join("stderr")).unwrap()))
@@ -47,10 +48,11 @@ fn signal(child: &Child, name: &str) {
 
 #[test]
 fn wrong_product_exits_78_and_touches_nothing() {
-    let fake = Fake::new("ASUS Zenbook Duo UX8406CA", 8, 99);
+    let fake = Fake::new("ASUS Zenbook Duo UX8406CA", 37, 22);
     let before = fake.snapshot();
     let out = Command::new(BIN)
         .arg("--sys").arg(&fake.sys)
+        .arg("--proc").arg(&fake.proc)
         .arg("--state-dir").arg(fake.run_dir())
         .output()
         .unwrap();
@@ -60,47 +62,48 @@ fn wrong_product_exits_78_and_touches_nothing() {
 }
 
 #[test]
-fn sigterm_restores_the_original_offset() {
-    let fake = Fake::new("UX5406SA", 8, 99);
+fn sigterm_restores_the_original_limits() {
+    let fake = Fake::new("UX5406SA", 37, 22);
     let mut child = spawn(&fake);
     ready(&fake);
     emit_event(&fake);
-    wait_for("offset raised", || fake.offset() > 8);
+    wait_for("limits capped", || fake.limits() == (9, 9));
     signal(&child, "TERM");
     let status = child.wait().unwrap();
     assert!(status.success());
-    assert_eq!(fake.offset(), 8);
-    assert!(!fake.run_dir().join("original-offset").exists());
+    assert_eq!(fake.limits(), (37, 22));
+    assert!(!fake.run_dir().join("original-limits").exists());
 }
 
 #[test]
-fn sigkill_leaves_a_note_and_restore_command_puts_the_offset_back() {
-    let fake = Fake::new("UX5406SA", 8, 99);
+fn sigkill_leaves_a_note_and_restore_command_puts_the_limits_back() {
+    let fake = Fake::new("UX5406SA", 37, 22);
     let mut child = spawn(&fake);
     ready(&fake);
     emit_event(&fake);
-    wait_for("offset raised", || fake.offset() > 8);
+    wait_for("limits capped", || fake.limits() == (9, 9));
     signal(&child, "KILL");
     child.wait().unwrap();
-    assert!(fake.offset() > 8);
+    assert_eq!(fake.limits(), (9, 9));
     let status = Command::new(BIN)
         .arg("restore")
         .arg("--sys").arg(&fake.sys)
+        .arg("--proc").arg(&fake.proc)
         .arg("--state-dir").arg(fake.run_dir())
         .status()
         .unwrap();
     assert!(status.success());
-    assert_eq!(fake.offset(), 8);
+    assert_eq!(fake.limits(), (37, 22));
 }
 
 #[test]
 fn events_older_than_the_start_are_ignored() {
-    let fake = Fake::new("UX5406SA", 8, 99);
+    let fake = Fake::new("UX5406SA", 37, 22);
     emit_event(&fake);
     let mut child = spawn(&fake);
     ready(&fake);
     sleep(Duration::from_millis(2500));
-    assert_eq!(fake.offset(), 8);
+    assert_eq!(fake.limits(), (37, 22));
     signal(&child, "TERM");
     child.wait().unwrap();
 }

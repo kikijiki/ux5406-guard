@@ -1,5 +1,5 @@
-//! The machine as sysfs shows it. The guard writes exactly one file: the CPU
-//! thermal offset.
+//! The machine as sysfs and procfs show it. The guard writes exactly two files:
+//! the package power limits.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -9,26 +9,38 @@ use crate::error::Error;
 
 pub const PRODUCT: &str = "UX5406SA";
 const PRODUCT_FILE: &str = "class/dmi/id/product_name";
-const OFFSET_FILE: &str = "bus/pci/devices/0000:00:04.0/tcc_offset_degree_celsius";
-/// A plausible offset; anything else in the file is not believed.
-const OFFSET_RANGE: std::ops::RangeInclusive<i32> = 0..=63;
+/// The MSR limit and the firmware (MMIO) limit; the lower one wins.
+const LIMIT_FILES: [&str; 2] = [
+    "class/powercap/intel-rapl:0/constraint_0_power_limit_uw",
+    "class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw",
+];
+const LID_DIR: &str = "acpi/button/lid";
+/// A plausible limit (microwatts); anything else in the file is not believed.
+const LIMIT_RANGE: std::ops::RangeInclusive<u64> = 1_000_000..=250_000_000;
 
-/// The files the guard uses, resolved below a `/sys`-like root.
+/// The two limits, in microwatts: MSR, then firmware.
+pub type Limits = (u64, u64);
+
+/// The files the guard uses, resolved below `/sys` and `/proc`-like roots.
 #[derive(Clone, Debug)]
 pub struct Machine {
-    pub offset: PathBuf,
-    pub temp: PathBuf,
+    limits: [PathBuf; 2],
+    lid: PathBuf,
 }
 
 fn read(path: &Path) -> Result<String, Error> {
     fs::read_to_string(path).map_err(|source| Error::Read { path: path.to_owned(), source })
 }
 
-fn read_int(path: &Path) -> Result<i32, Error> {
+fn read_limit(path: &Path) -> Result<u64, Error> {
     let text = read(path)?;
-    text.trim()
-        .parse()
-        .map_err(|_| Error::Parse { path: path.to_owned(), text: text.trim().to_owned() })
+    let parse = || Error::Parse { path: path.to_owned(), text: text.trim().to_owned() };
+    let value: u64 = text.trim().parse().map_err(|_| parse())?;
+    if LIMIT_RANGE.contains(&value) {
+        Ok(value)
+    } else {
+        Err(parse())
+    }
 }
 
 pub fn check_product(sys: &Path) -> Result<(), Error> {
@@ -41,52 +53,47 @@ pub fn check_product(sys: &Path) -> Result<(), Error> {
     }
 }
 
-pub fn offset_path(sys: &Path) -> PathBuf {
-    sys.join(OFFSET_FILE)
+impl Machine {
+    /// Check the product and find the limits and the lid.
+    pub fn open(sys: &Path, proc: &Path) -> Result<Machine, Error> {
+        check_product(sys)?;
+        let limits = LIMIT_FILES.map(|f| sys.join(f));
+        for path in &limits {
+            read_limit(path)?;
+        }
+        let dir = proc.join(LID_DIR);
+        let entries = fs::read_dir(&dir).map_err(|_| Error::NoLid)?;
+        let mut states: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path().join("state")).filter(|p| p.is_file()).collect();
+        states.sort();
+        let lid = states.into_iter().next().ok_or(Error::NoLid)?;
+        Ok(Machine { limits, lid })
+    }
+
+    pub fn limits(&self) -> Result<Limits, Error> {
+        Ok((read_limit(&self.limits[0])?, read_limit(&self.limits[1])?))
+    }
+
+    /// Both writes are tried; the first failure is returned.
+    pub fn set_limits(&self, (msr, mmio): Limits) -> Result<(), Error> {
+        let a = write_limit(&self.limits[0], msr);
+        let b = write_limit(&self.limits[1], mmio);
+        a.and(b)
+    }
+
+    pub fn lid_closed(&self) -> Result<bool, Error> {
+        let text = read(&self.lid)?;
+        match text.split_once(':').map(|(_, state)| state.trim()) {
+            Some("closed") => Ok(true),
+            Some("open") => Ok(false),
+            _ => Err(Error::Parse { path: self.lid.clone(), text: text.trim().to_owned() }),
+        }
+    }
 }
 
-impl Machine {
-    /// Check the product and find the package sensor.
-    pub fn open(sys: &Path) -> Result<Machine, Error> {
-        check_product(sys)?;
-        let hwmon = sys.join("class/hwmon");
-        let entries = fs::read_dir(&hwmon)
-            .map_err(|source| Error::Read { path: hwmon.clone(), source })?;
-        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        dirs.sort();
-        for dir in dirs {
-            let named = fs::read_to_string(dir.join("name")).is_ok_and(|n| n.trim() == "coretemp");
-            let package =
-                fs::read_to_string(dir.join("temp1_label")).is_ok_and(|l| l.trim() == "Package id 0");
-            if named && package {
-                return Ok(Machine { offset: offset_path(sys), temp: dir.join("temp1_input") });
-            }
-        }
-        Err(Error::NoSensor)
-    }
-
-    /// Package temperature, degrees C.
-    pub fn temp(&self) -> Result<i32, Error> {
-        let milli = read_int(&self.temp)?;
-        if !(0..=150_000).contains(&milli) {
-            return Err(Error::Parse { path: self.temp.clone(), text: milli.to_string() });
-        }
-        Ok(milli / 1000)
-    }
-
-    pub fn offset(&self) -> Result<i32, Error> {
-        let value = read_int(&self.offset)?;
-        if OFFSET_RANGE.contains(&value) {
-            Ok(value)
-        } else {
-            Err(Error::Parse { path: self.offset.clone(), text: value.to_string() })
-        }
-    }
-
-    /// The only write the guard makes. The file is opened, never created.
-    pub fn set_offset(&self, value: i32) -> Result<(), Error> {
-        let fail = |source| Error::Write { path: self.offset.clone(), source };
-        let mut file = OpenOptions::new().write(true).truncate(true).open(&self.offset).map_err(fail)?;
-        file.write_all(format!("{value}\n").as_bytes()).map_err(fail)
-    }
+/// The only writes the guard makes. The file is opened, never created.
+fn write_limit(path: &Path, value: u64) -> Result<(), Error> {
+    let fail = |source| Error::Write { path: path.to_owned(), source };
+    let mut file = OpenOptions::new().write(true).truncate(true).open(path).map_err(fail)?;
+    file.write_all(format!("{value}\n").as_bytes()).map_err(fail)
 }

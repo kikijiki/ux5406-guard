@@ -1,88 +1,76 @@
 # ux5406-guard
 
-Attempted thermal guard for the ASUS Zenbook S 14 UX5406SA (Intel Lunar Lake). It
-sheds CPU load on the EC's thermal warning; it did not stop the power cuts (see Result).
-It never sleeps, suspends, hibernates or powers off the machine.
+Power guard for the ASUS Zenbook S 14 UX5406SA (Intel Lunar Lake). It caps package
+power while the lid is closed, and harder after the EC's thermal warning, so the
+EC does not cut the power. It never sleeps, suspends, hibernates or powers off the
+machine.
 
 ## Problem
 
-With the lid closed and the CPU hot, the EC raises a thermal warning that the
-kernel logs as `asus_wmi: Unknown key code 0x6d`. If the CPU stays hot the EC cuts
-power about 3 minutes after the last event (180 to 182 s in three cuts recorded at 1 s resolution), leaving no trace in the journal. Windows hibernates
-on this event; Linux ignores it.
+With the lid closed and a sustained all-core load, the EC raises a warning that the
+kernel logs as `asus_wmi: Unknown key code 0x6d` (ACPI query `_QB3`). About 3 minutes
+after the last event it cuts the power, leaving no trace in the journal (180 to
+183 s in three cuts recorded at 1 s resolution). Windows hibernates on this event;
+Linux ignores it.
 
-Observations on one unit (BIOS UX5406SA.309, kernel 7.2): three power losses, each
-with AC connected, lid closed and a sustained all-core load (cargo and nvcc builds).
-The journal ends 1m34s to 2m17s after the last event, but journald lags the real cut; the fsynced recorder puts it at 180 to 182 s. In one boot the
-event fired six times, 4 to 6 minutes apart, without a loss, so it is a warning and
-not always fatal. The charge cap (80 %), the BIOS and the `ucsi_acpi ...
-GET_CURRENT_CAM command failed` message do not correlate with the losses; the
-message also appears on boots that ended cleanly.
+Observed on one unit (BIOS UX5406SA.309, kernel 7.2), always on AC:
+
+- Lid closed, package held at the firmware limit (22 W): the event comes about
+  127 s into the load, every time.
+- Lid open, same load, 15 minutes: no event.
+- Package temperature is not the trigger: events at 83 to 86 C, a cut at 75 C.
+  Raising the TCC offset to throttle earlier did not prevent three cuts.
+- Capping package power avoids it with the lid closed:
+
+  | Cap (both RAPL limits), full load | Result |
+  |---|---|
+  | 9 W, applied on the event | no cut, twice |
+  | 12 W | 15 min, no event |
+  | 14 W | 20 min, no event |
+  | 16 W | event after 127 s |
+
+  The EC's line is somewhere between 14 and 16 W. A cap costs roughly 35 to 40
+  percent of the sustained power. 15 W was not tested.
+
+The 127 s may be a power-over-time rule in the EC; that was not established.
 
 ## Mechanism
 
-On the event the guard raises the CPU thermal offset
-(`/sys/bus/pci/devices/0000:00:04.0/tcc_offset_degree_celsius`), which lowers the
-temperature the CPU throttles at (tjmax minus offset).
+Package power has three levels, set through both RAPL limits
+(`intel-rapl:0` and `intel-rapl-mmio:0`, `constraint_0_power_limit_uw`; the lower
+one wins):
 
-- Idle: reads `/dev/kmsg` (kernel records only, from the end). Writes nothing.
-- Event: saves the current offset, then raises it by `step-up` every `interval`
-  seconds while the package temperature is above `hold-temp`, up to `max-offset`.
-- Hold: after `settle` seconds at or below `hold-temp` the offset is held. After
-  `probe-interval` seconds without an event it is lowered one degree, repeatedly,
-  until the original offset is back.
-- An event while holding raises again.
+- Lid open: the limits found at start, untouched.
+- Lid closed: `cap` (13 W).
+- After an event, lid open or closed: `safe` (9 W) for `hold` seconds (300). A
+  further event extends it. Then back to the lid's level.
 
-Only the offset attribute is written. The guard refuses to run unless the DMI
-product name contains `UX5406SA` (exit status 78, not restarted). It restores the
-original offset on SIGTERM/SIGINT; after a crash or SIGKILL the unit's
-`ExecStopPost` (`ux5406-guard restore`) or the next start does it from the note in
-`/run/ux5406-guard`. Read and write failures are logged and retried; the service
-keeps running.
+Reads `/dev/kmsg` (kernel records only, from the end) and
+`/proc/acpi/button/lid/*/state`. The limits are checked every second and put back
+if something else changes them while capped.
 
-## Result
-
-Tried on one unit with the lid closed under load: three power losses with the guard
-active. The last had the offset at 26 to 28, package at 75 C and 16 W, fans at
-maximum, AC on, and came 3 minutes after the event. The guard does not prevent the
-cut on this model; package temperature and power are not the trigger. It stays
-available as a way to cap the CPU, but it is not a fix.
+Only the two limit files are written. The guard refuses to run unless the DMI
+product name contains `UX5406SA` (exit status 78, not restarted). The original
+limits are noted in `/run/ux5406-guard` before the first change and restored on
+SIGTERM/SIGINT; after a crash or SIGKILL the unit's `ExecStopPost`
+(`ux5406-guard restore`) or the next start does it from the note. Read and write
+failures are logged and retried; the service keeps running.
 
 ## Limits
 
-- It reduces heat. It does not identify the EC's condition.
-- The first event of an episode is not prevented; the guard reacts to it.
-- `hold-temp` is not calibrated for this model (below).
+- The first event after a long idle is not prevented, only answered. At 13 W none
+  was seen.
+- The 14 W figure is one 20-minute run; the default keeps a margin below it. The
+  cap is not accepted above 14 W.
+- The EC's actual condition is unknown. A different charger, BIOS or ambient
+  temperature may move the line.
 - No shutdown logic. The kernel thermal core's trips (103 and 110 C here) are the
   only backstop.
 
-## Calibration
-
-Measured on one unit: tjmax 100 C, default offset 8 (throttle at 92 C), PL1/PL2
-37/40 W. Lid open, the package sat at 84 to 85 C under load and peaked at 93 C with
-no event. Journals from lost boots contain no temperatures, so the temperature at
-which the EC raises the event and the one at which it stops are unknown.
-With the guard active and the lid closed, the package held at 84 to 86 C (offset 16 to
-17, about 21 W) and the EC still raised the event three times in 7 minutes. A step
-down of the offset at 85 C was followed by an event 40 s later, and the machine lost
-power 3 minutes after the last event, 10 minutes after the first. So 85 C is not low
-enough with the lid closed, or package temperature is not the whole condition. The
-default `hold-temp` is 75 C, still a guess.
-
-To calibrate, log package temperature (1 s resolution around events), package
-power, and event timestamps. Needed:
-
-1. Package temperature just before each event: set `hold-temp` a few degrees below.
-2. Whether events repeat while the guard holds, and at what temperature they stop.
-3. Package power at steady state, for the throughput cost.
-4. For any power loss, the time from the last event to the end of the log.
-
 ## Usage
 
-Settings (defaults): `--hold-temp 75` C, `--step-up 2`, `--max-offset 30`,
-`--interval 4` s, `--settle 20` s, `--probe-interval 600` s (at least 60; the
-walk-back is slow because a step down has provoked an event). `ux5406-guard restore` writes
-back a saved offset and exits.
+Settings (defaults): `--cap 13` W (5..=14), `--safe 9` W (5..=cap), `--hold 300` s
+(30..=3600). `ux5406-guard restore` writes back saved limits and exits.
 
 NixOS:
 
@@ -91,31 +79,28 @@ inputs.ux5406-guard.url = "github:kikijiki/ux5406-guard";
 # modules:
 imports = [ inputs.ux5406-guard.nixosModules.default ];
 services.ux5406-guard.enable = true;
-# options: holdTemp stepUp maxOffset interval settle probeInterval
+# options: capWatts safeWatts holdSeconds
 ```
 
 Log: `journalctl -u ux5406-guard`. Examples:
 
 ```
+lid closed: package power capped at 13 W
 event: asus_wmi: Unknown key code 0x6d
-91 C: above hold temperature: offset raised to 10
-80 C: cooled, holding offset 16
-no event: offset lowered to 15
-no event at the original offset: released, offset 8
-stopping: offset back to 8
+safe level: package power capped at 9 W for 300 s (lid closed)
+lid open: original limits
+stopping: limits back to 37000000 / 22000000 uW
 error: cannot write /sys/...: Read-only file system
 ```
 
-Remove: disable the option and rebuild. Stopping the unit restores the offset.
+Remove: disable the option and rebuild. Stopping the unit restores the limits.
 
 ## Related
 
 - thermald runs in polling mode on this model with no usable tables (empty ACPI
-  `_TRT`) and does not touch the offset. Its adaptive mode (Intel DPTF)
-  could set power limits per profile; that is a steady-state policy and
-  complementary to this reactive guard. Not tested on this model.
+  `_TRT`) and does not touch the limits.
 - asusctl 6.5.0: `asus-armoury` exposes only `charge_mode` here (no power limits),
-  and the `asus` hwmon device has no fan-curve points. No better knob.
+  and the `asus` hwmon device has no fan-curve points.
 
 ## Development
 
@@ -127,45 +112,22 @@ nix build
 
 ## Tests
 
-`tests/service.rs`: the service against a fake `/sys` tree and a scripted event
-stream, one tick per second. `tests/process.rs`: the binary against a fake tree and
-a log file that is appended to.
+`tests/service.rs`: the service against a fake `/sys` and `/proc` tree and a
+scripted event stream, one tick per second. `tests/process.rs`: the binary against
+a fake tree and a log file that is appended to.
 
-Covered: no write without an event; stepped raise; maximum clamp; settle, probe
-interval, step down, release at the original offset; repeated event while throttled;
-event kept across a failed step; restore on finish, on SIGTERM, and after SIGKILL via
-the note; wrong product (exit 78, tree untouched); unwritable attribute (typed
-error, recovers); invalid attribute content; only the one attribute changes; kernel
-record matching; events from before start ignored.
-
-### Mutation checks
-
-Each mutation was applied by hand, the suite run, and the change reverted.
-
-| Mutation | Result |
-|---|---|
-| step-up adds nothing | killed |
-| no `max_offset` clamp | killed |
-| no wait before step down | killed |
-| no settle time | killed |
-| never released to original offset | killed |
-| trip not reported on event while holding | survived, then killed by a control test |
-| base overwritten by repeated event | killed |
-| `finish` restores nothing | killed |
-| note not saved | killed |
-| product check removed | killed |
-| attribute `open` error swallowed | killed |
-| attribute `write_all` error swallowed | survives: not reproducible on a regular file |
-| kernel facility check removed | killed |
-| prefix match loosened to substring | killed |
-| log not opened at its end | killed |
-| event dropped when a step fails | killed |
-| state advances before the write succeeds | survived, then killed by an added assertion |
+Covered: no write with the lid open; cap on close and restore on open; safe level
+for the hold, extension by a second event, event with the lid open; limits changed
+by someone else put back; the original is the first value found; event kept across
+a failed step; restore on finish, on SIGTERM, and after SIGKILL via the note; wrong
+product (exit 78, tree untouched); missing lid; unwritable limit (typed error,
+recovers, original survives); invalid limit content; only the two limits change;
+kernel record matching; events from before start ignored; setting ranges.
 
 ### Not tested
 
-- The systemd unit. `ReadWritePaths` on a sysfs file under `ProtectKernelTunables`
-  and `/dev/kmsg` under `DevicePolicy=closed` need a real system. If the first write
-  fails the log shows `error: cannot write ...`; the fallback is to drop those two
-  settings.
-- Behaviour on hardware with the lid closed under load.
+- The systemd unit. `ReadWritePaths` on sysfs files under `ProtectKernelTunables`,
+  `/proc/acpi` under `ProcSubset=all` and `/dev/kmsg` under `DevicePolicy=closed`
+  need a real system.
+- Behaviour on hardware with the lid closed under load. The measurements above were
+  made with hand-written scripts that set the same limits.

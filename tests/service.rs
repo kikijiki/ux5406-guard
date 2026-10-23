@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::rc::Rc;
 
 use common::Fake;
-use ux5406_guard::control::Config;
+use ux5406_guard::control::{Config, Input, Level, State};
 use ux5406_guard::error::Error;
 use ux5406_guard::kmsg::{has_event, Events};
 use ux5406_guard::service::{note_path, restore, Note, Service};
@@ -30,13 +30,13 @@ impl Events for Stream {
 }
 
 fn config() -> Config {
-    // 1 s steps keep the scripted timelines short.
-    Config { hold_temp: 85, step_up: 2, max_offset: 30, interval: 1, settle: 3, probe_interval: 60 }
+    Config { cap_w: 13, safe_w: 9, hold: 60 }
 }
 
-fn setup(offset: i32, temp: i32) -> (Fake, Service<Stream>, Stream) {
-    let fake = Fake::new("ASUS Zenbook S 14 UX5406SA_UX5406SA", offset, temp);
-    let machine = Machine::open(&fake.sys).unwrap();
+/// Original limits: 37 W (MSR) and 22 W (firmware).
+fn setup() -> (Fake, Service<Stream>, Stream) {
+    let fake = Fake::new("ASUS Zenbook S 14 UX5406SA_UX5406SA", 37, 22);
+    let machine = Machine::open(&fake.sys, &fake.proc).unwrap();
     let stream = Stream::default();
     let service = Service::new(machine, Note(note_path(&fake.run_dir())), config(), stream.clone());
     (fake, service, stream)
@@ -50,153 +50,174 @@ fn run(s: &mut Service<Stream>, from: i32, to: i32) {
 }
 
 #[test]
-fn nothing_is_written_without_an_event() {
-    let (fake, mut s, _) = setup(8, 99);
+fn nothing_is_written_with_the_lid_open() {
+    let (fake, mut s, _) = setup();
     let before = fake.snapshot();
     run(&mut s, 0, 300);
     assert_eq!(fake.snapshot(), before);
-    assert_eq!(fake.offset(), 8);
+    assert_eq!(fake.limits(), (37, 22));
 }
 
 #[test]
-fn event_raises_the_offset_in_steps_while_hot() {
-    let (fake, mut s, stream) = setup(8, 92);
-    stream.event();
-    s.tick(0).unwrap();
-    assert_eq!(fake.offset(), 10);
-    s.tick(1).unwrap();
-    assert_eq!(fake.offset(), 12);
-    run(&mut s, 2, 5);
-    assert_eq!(fake.offset(), 20);
-}
-
-#[test]
-fn offset_never_exceeds_the_maximum() {
-    let (fake, mut s, stream) = setup(8, 99);
-    stream.event();
-    run(&mut s, 0, 100);
-    assert_eq!(fake.offset(), 30);
-}
-
-#[test]
-fn step_down_and_release_with_hysteresis() {
-    let (fake, mut s, stream) = setup(8, 99);
-    stream.event();
-    run(&mut s, 0, 3); // 8 -> 16 while hot
-    assert_eq!(fake.offset(), 16);
-    fake.set_temp(80);
-    run(&mut s, 4, 6); // settle 3 s at or below 85: holding
-    assert_eq!(fake.offset(), 16);
-    run(&mut s, 7, 6 + 59); // under probe_interval: no change
-    assert_eq!(fake.offset(), 16);
-    run(&mut s, 66, 66);
-    assert_eq!(fake.offset(), 15, "one degree down after probe_interval");
-    run(&mut s, 67, 66 + 60);
-    assert_eq!(fake.offset(), 14);
-    // Walk down to the original offset: released, note gone.
-    run(&mut s, 127, 127 + 60 * 8);
-    assert_eq!(fake.offset(), 8);
-    assert!(!note_path(&fake.run_dir()).exists());
-    assert!(!s.state.active());
-}
-
-#[test]
-fn event_while_holding_raises_again() {
-    let (fake, mut s, stream) = setup(8, 99);
-    stream.event();
+fn closing_the_lid_caps_both_limits_and_opening_it_restores_them() {
+    let (fake, mut s, _) = setup();
+    fake.set_lid(true);
     run(&mut s, 0, 2);
-    fake.set_temp(80);
-    run(&mut s, 3, 8); // cooled, holding at 14
-    assert_eq!(fake.offset(), 14);
-    fake.set_temp(90);
+    assert_eq!(fake.limits(), (13, 13));
+    assert!(note_path(&fake.run_dir()).exists());
+    fake.set_lid(false);
+    run(&mut s, 3, 5);
+    assert_eq!(fake.limits(), (37, 22));
+    assert!(!note_path(&fake.run_dir()).exists());
+}
+
+#[test]
+fn an_event_drops_to_the_safe_level_for_the_hold_then_returns() {
+    let (fake, mut s, stream) = setup();
+    fake.set_lid(true);
+    run(&mut s, 0, 9);
     stream.event();
-    run(&mut s, 9, 9);
-    assert_eq!(fake.offset(), 16, "repeated event while throttled raises again");
-    // The original offset is still the one found at the first event.
-    assert_eq!(s.state.base(), Some(8));
+    run(&mut s, 10, 10);
+    assert_eq!(fake.limits(), (9, 9));
+    run(&mut s, 11, 69);
+    assert_eq!(fake.limits(), (9, 9), "held for 60 s");
+    run(&mut s, 70, 70);
+    assert_eq!(fake.limits(), (13, 13));
+}
+
+#[test]
+fn an_event_with_the_lid_open_is_also_met_and_released_to_the_original() {
+    let (fake, mut s, stream) = setup();
+    stream.event();
+    run(&mut s, 0, 0);
+    assert_eq!(fake.limits(), (9, 9));
+    run(&mut s, 1, 60);
+    assert_eq!(fake.limits(), (37, 22));
+    assert!(!note_path(&fake.run_dir()).exists());
+}
+
+#[test]
+fn a_second_event_extends_the_hold() {
+    let (fake, mut s, stream) = setup();
+    fake.set_lid(true);
+    stream.event();
+    run(&mut s, 0, 40);
+    stream.event();
+    run(&mut s, 41, 100);
+    assert_eq!(fake.limits(), (9, 9));
+    run(&mut s, 101, 101);
+    assert_eq!(fake.limits(), (13, 13));
+}
+
+#[test]
+fn limits_changed_by_someone_else_are_put_back() {
+    let (fake, mut s, _) = setup();
+    fake.set_lid(true);
+    run(&mut s, 0, 2);
+    fs::write(fake.msr_path(), "37000000\n").unwrap();
+    run(&mut s, 3, 3);
+    assert_eq!(fake.limits(), (13, 13));
+}
+
+#[test]
+fn the_original_is_the_first_one_found_not_a_capped_value() {
+    let (fake, mut s, stream) = setup();
+    fake.set_lid(true);
+    run(&mut s, 0, 2);
+    stream.event();
+    run(&mut s, 3, 3);
+    s.finish().unwrap();
+    assert_eq!(fake.limits(), (37, 22));
 }
 
 #[test]
 fn restore_on_finish_and_note_removed() {
-    let (fake, mut s, stream) = setup(8, 99);
-    stream.event();
-    run(&mut s, 0, 4);
-    assert!(fake.offset() > 8);
-    assert!(note_path(&fake.run_dir()).exists());
+    let (fake, mut s, _) = setup();
+    fake.set_lid(true);
+    run(&mut s, 0, 2);
     s.finish().unwrap();
-    assert_eq!(fake.offset(), 8);
+    assert_eq!(fake.limits(), (37, 22));
     assert!(!note_path(&fake.run_dir()).exists());
 }
 
 #[test]
 fn restore_after_a_kill_uses_the_note() {
-    let (fake, mut s, stream) = setup(8, 99);
-    stream.event();
-    run(&mut s, 0, 4);
+    let (fake, mut s, _) = setup();
+    fake.set_lid(true);
+    run(&mut s, 0, 2);
     drop(s); // killed: no finish()
-    assert!(fake.offset() > 8);
-    let machine = Machine::open(&fake.sys).unwrap();
+    assert_eq!(fake.limits(), (13, 13));
+    let machine = Machine::open(&fake.sys, &fake.proc).unwrap();
     let note = Note(note_path(&fake.run_dir()));
-    assert_eq!(restore(&machine, &note).unwrap(), Some(8));
-    assert_eq!(fake.offset(), 8);
+    assert_eq!(restore(&machine, &note).unwrap(), Some((37_000_000, 22_000_000)));
+    assert_eq!(fake.limits(), (37, 22));
     assert_eq!(restore(&machine, &note).unwrap(), None);
 }
 
 #[test]
 fn wrong_product_is_refused() {
-    let fake = Fake::new("ASUS Zenbook Duo UX8406CA", 8, 50);
-    match Machine::open(&fake.sys) {
+    let fake = Fake::new("ASUS Zenbook Duo UX8406CA", 37, 22);
+    match Machine::open(&fake.sys, &fake.proc) {
         Err(Error::WrongProduct { found, .. }) => assert!(found.contains("UX8406CA")),
         other => panic!("expected WrongProduct, got {other:?}"),
     }
 }
 
 #[test]
-fn unwritable_attribute_is_a_typed_error_and_the_service_continues() {
-    let (fake, mut s, stream) = setup(8, 99);
-    fs::set_permissions(fake.offset_path(), fs::Permissions::from_mode(0o444)).unwrap();
-    if fs::OpenOptions::new().write(true).open(fake.offset_path()).is_ok() {
+fn a_missing_lid_is_a_typed_error() {
+    let fake = Fake::new("UX5406SA", 37, 22);
+    fs::remove_dir_all(fake.proc.join("acpi")).unwrap();
+    assert!(matches!(Machine::open(&fake.sys, &fake.proc), Err(Error::NoLid)));
+}
+
+#[test]
+fn unwritable_limit_is_a_typed_error_and_the_service_continues() {
+    let (fake, mut s, _) = setup();
+    fs::set_permissions(fake.msr_path(), fs::Permissions::from_mode(0o444)).unwrap();
+    if fs::OpenOptions::new().write(true).open(fake.msr_path()).is_ok() {
         eprintln!("running as root: read-only mode is not enforced, skipping");
         return;
     }
-    stream.event();
+    fake.set_lid(true);
     assert!(matches!(s.tick(0), Err(Error::Write { .. })));
-    assert_eq!(fake.offset(), 8);
-    assert!(!s.state.active(), "state does not advance on a failed write");
     // The attribute becomes writable again: the next tick works.
-    fs::set_permissions(fake.offset_path(), fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(fake.msr_path(), fs::Permissions::from_mode(0o644)).unwrap();
     s.tick(1).unwrap();
-    assert_eq!(fake.offset(), 10);
+    assert_eq!(fake.limits(), (13, 13));
+    s.finish().unwrap();
+    assert_eq!(fake.limits(), (37, 22), "the original survives the failed write");
 }
 
 #[test]
 fn an_event_is_kept_when_the_step_fails() {
-    let (fake, mut s, stream) = setup(8, 99);
-    fs::write(fake.sys.join("class/hwmon/hwmon8/temp1_input"), "banana\n").unwrap();
+    let (fake, mut s, stream) = setup();
+    fs::write(fake.proc.join("acpi/button/lid/LID/state"), "banana\n").unwrap();
     stream.event();
     assert!(matches!(s.tick(0), Err(Error::Parse { .. })));
-    fake.set_temp(99);
+    fake.set_lid(false);
     s.tick(1).unwrap(); // no new event was pushed
-    assert_eq!(fake.offset(), 10);
+    assert_eq!(fake.limits(), (9, 9));
 }
 
 #[test]
-fn garbage_in_the_attribute_is_not_believed() {
-    let (fake, mut s, _) = setup(8, 50);
-    fs::write(fake.offset_path(), "banana\n").unwrap();
+fn garbage_in_a_limit_is_not_believed() {
+    let (fake, mut s, _) = setup();
+    fs::write(fake.msr_path(), "banana\n").unwrap();
     assert!(matches!(s.tick(0), Err(Error::Parse { .. })));
+    fs::write(fake.msr_path(), "1\n").unwrap();
+    assert!(matches!(s.tick(1), Err(Error::Parse { .. })), "out of range");
 }
 
 #[test]
-fn only_the_one_attribute_is_ever_written() {
-    let (fake, mut s, stream) = setup(8, 99);
+fn only_the_two_limits_are_ever_written() {
+    let (fake, mut s, stream) = setup();
     let before = fake.snapshot();
+    fake.set_lid(true);
     stream.event();
-    run(&mut s, 0, 10);
+    run(&mut s, 0, 100);
     s.finish().unwrap();
-    let after = fake.snapshot();
-    let changed: Vec<_> = before.iter().zip(&after).filter(|(a, b)| a != b).map(|(a, _)| a.0.clone()).collect();
-    assert!(changed.is_empty(), "restored: nothing differs, got {changed:?}");
+    fake.set_lid(false);
+    assert_eq!(fake.snapshot(), before);
 }
 
 #[test]
@@ -212,16 +233,22 @@ fn event_line_matching() {
 }
 
 #[test]
-fn control_reports_a_trip_on_event_while_holding() {
-    use ux5406_guard::control::{Input, State, What};
+fn control_levels() {
     let cfg = config();
     let mut st = State::default();
-    let at = |now, event, temp, offset| Input { now, event, temp, offset };
-    st.step(&cfg, &at(0, true, 90, 8));
-    for t in 1..=3 {
-        st.step(&cfg, &at(t, false, 80, 10));
-    }
-    let out = st.step(&cfg, &at(4, true, 90, 10));
-    assert_eq!(out.what, Some(What::Tripped));
-    assert_eq!(out.write, Some(12));
+    let at = |now, event, lid_closed| Input { now, event, lid_closed };
+    assert_eq!(st.step(&cfg, &at(0, false, false)), Level::Original);
+    assert_eq!(st.step(&cfg, &at(1, false, true)), Level::Cap);
+    assert_eq!(st.step(&cfg, &at(2, true, true)), Level::Safe);
+    assert_eq!(st.step(&cfg, &at(61, false, true)), Level::Safe);
+    assert_eq!(st.step(&cfg, &at(62, false, true)), Level::Cap);
+}
+
+#[test]
+fn config_limits() {
+    let ok = Config::default();
+    assert!(ok.validate().is_ok());
+    assert!(Config { cap_w: 16, ..ok }.validate().is_err(), "16 W produced the event");
+    assert!(Config { safe_w: 14, ..ok }.validate().is_err(), "safe above cap");
+    assert!(Config { hold: 5, ..ok }.validate().is_err());
 }

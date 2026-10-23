@@ -5,43 +5,50 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static N: AtomicU32 = AtomicU32::new(0);
 
-/// A fake `/sys` below a fresh temporary directory.
+const MSR: &str = "class/powercap/intel-rapl:0/constraint_0_power_limit_uw";
+const MMIO: &str = "class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw";
+
+/// A fake `/sys` and `/proc` below a fresh temporary directory.
 pub struct Fake {
     pub root: PathBuf,
     pub sys: PathBuf,
+    pub proc: PathBuf,
 }
 
 impl Fake {
-    pub fn new(product: &str, offset: i32, temp_c: i32) -> Fake {
+    /// Limits are the MSR and firmware values in watts; the lid starts open.
+    pub fn new(product: &str, msr_w: u64, mmio_w: u64) -> Fake {
         let root = std::env::temp_dir()
             .join(format!("ux5406-guard-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        let sys = root.join("sys");
-        let w = |rel: &str, text: String| {
-            let p = sys.join(rel);
+        let fake = Fake { sys: root.join("sys"), proc: root.join("proc"), root };
+        let w = |base: &Path, rel: &str, text: String| {
+            let p = base.join(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, text).unwrap();
         };
-        w("class/dmi/id/product_name", format!("{product}\n"));
-        w("class/hwmon/hwmon3/name", "nvme\n".into());
-        w("class/hwmon/hwmon8/name", "coretemp\n".into());
-        w("class/hwmon/hwmon8/temp1_label", "Package id 0\n".into());
-        w("class/hwmon/hwmon8/temp1_input", format!("{}\n", temp_c * 1000));
-        w("bus/pci/devices/0000:00:04.0/tcc_offset_degree_celsius", format!("{offset}\n"));
-        fs::create_dir_all(root.join("run")).unwrap();
-        fs::write(root.join("kmsg"), "").unwrap();
-        Fake { root, sys }
+        w(&fake.sys, "class/dmi/id/product_name", format!("{product}\n"));
+        w(&fake.sys, MSR, format!("{}\n", msr_w * 1_000_000));
+        w(&fake.sys, MMIO, format!("{}\n", mmio_w * 1_000_000));
+        fs::create_dir_all(fake.root.join("run")).unwrap();
+        fs::write(fake.root.join("kmsg"), "").unwrap();
+        fake.set_lid(false);
+        fake
     }
 
-    pub fn set_temp(&self, c: i32) {
-        fs::write(self.sys.join("class/hwmon/hwmon8/temp1_input"), format!("{}\n", c * 1000)).unwrap();
+    pub fn set_lid(&self, closed: bool) {
+        let p = self.proc.join("acpi/button/lid/LID/state");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, format!("state:      {}\n", if closed { "closed" } else { "open" })).unwrap();
     }
 
-    pub fn offset(&self) -> i32 {
-        read(&self.offset_path()).trim().parse().unwrap()
+    /// The MSR and firmware limits in watts.
+    pub fn limits(&self) -> (u64, u64) {
+        let r = |rel: &str| read(&self.sys.join(rel)).trim().parse::<u64>().unwrap() / 1_000_000;
+        (r(MSR), r(MMIO))
     }
 
-    pub fn offset_path(&self) -> PathBuf {
-        self.sys.join("bus/pci/devices/0000:00:04.0/tcc_offset_degree_celsius")
+    pub fn msr_path(&self) -> PathBuf {
+        self.sys.join(MSR)
     }
 
     pub fn run_dir(&self) -> PathBuf {
@@ -52,7 +59,7 @@ impl Fake {
         self.root.join("kmsg")
     }
 
-    /// Every file below the fake tree with its content, to prove what was written.
+    /// Every file below the fake trees with its content, to prove what was written.
     pub fn snapshot(&self) -> Vec<(PathBuf, String)> {
         fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
             let mut entries: Vec<_> = fs::read_dir(dir).unwrap().flatten().collect();
@@ -68,6 +75,7 @@ impl Fake {
         }
         let mut out = Vec::new();
         walk(&self.sys, &mut out);
+        walk(&self.proc, &mut out);
         out
     }
 }
