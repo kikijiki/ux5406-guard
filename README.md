@@ -124,6 +124,22 @@ product (exit 78, tree untouched); missing lid; unwritable limit (typed error,
 recovers, original survives); invalid limit content; only the two limits change;
 kernel record matching; events from before start ignored; setting ranges.
 
+### Mutation checks
+
+Each mutation was applied by hand, the suite run, and the change reverted.
+
+| Mutation | Result |
+|---|---|
+| cap applied with the lid open instead of closed | detected: the suite hangs instead of failing |
+| hold ends one second late | killed |
+| second event does not extend the hold | killed |
+| note not saved | killed |
+| limits changed by someone else not put back | killed |
+| original overwritten by a capped value | killed |
+| product check removed | killed |
+| firmware-limit write error swallowed | survived, then killed by an added test |
+| `finish` restores nothing | killed |
+
 ### Not tested
 
 - The systemd unit. `ReadWritePaths` on sysfs files under `ProtectKernelTunables`,

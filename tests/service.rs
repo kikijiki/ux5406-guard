@@ -189,6 +189,19 @@ fn unwritable_limit_is_a_typed_error_and_the_service_continues() {
 }
 
 #[test]
+fn a_failed_write_of_the_firmware_limit_is_reported() {
+    let (fake, mut s, _) = setup();
+    let mmio = fake.sys.join("class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw");
+    fs::set_permissions(&mmio, fs::Permissions::from_mode(0o444)).unwrap();
+    if fs::OpenOptions::new().write(true).open(&mmio).is_ok() {
+        eprintln!("running as root: read-only mode is not enforced, skipping");
+        return;
+    }
+    fake.set_lid(true);
+    assert!(matches!(s.tick(0), Err(Error::Write { .. })));
+}
+
+#[test]
 fn an_event_is_kept_when_the_step_fails() {
     let (fake, mut s, stream) = setup();
     fs::write(fake.proc.join("acpi/button/lid/LID/state"), "banana\n").unwrap();
