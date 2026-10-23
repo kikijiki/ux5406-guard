@@ -17,7 +17,7 @@ Observed on one unit (BIOS UX5406SA.309, kernel 7.2), always on AC:
 
 - Lid closed, package held at the firmware limit (22 W): the event comes about
   127 s into the load, every time.
-- Lid open, same load, 15 minutes: no event.
+- Lid open, same load, 15 minutes each at 22 W, 16 W and 14 W: no event.
 - Package temperature is not the trigger: events at 83 to 86 C, a cut at 75 C.
   Raising the TCC offset to throttle earlier did not prevent three cuts.
 - Capping package power avoids it with the lid closed:
