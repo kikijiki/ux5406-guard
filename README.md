@@ -1,7 +1,7 @@
 # ux5406-guard
 
-Thermal guard for the ASUS Zenbook S 14 UX5406SA (Intel Lunar Lake). It sheds CPU
-load so the embedded controller (EC) does not cut power when the lid is closed.
+Attempted thermal guard for the ASUS Zenbook S 14 UX5406SA (Intel Lunar Lake). It
+sheds CPU load on the EC's thermal warning; it did not stop the power cuts (see Result).
 It never sleeps, suspends, hibernates or powers off the machine.
 
 ## Problem
@@ -39,6 +39,14 @@ original offset on SIGTERM/SIGINT; after a crash or SIGKILL the unit's
 `ExecStopPost` (`ux5406-guard restore`) or the next start does it from the note in
 `/run/ux5406-guard`. Read and write failures are logged and retried; the service
 keeps running.
+
+## Result
+
+Tried on one unit with the lid closed under load: three power losses with the guard
+active. The last had the offset at 26 to 28, package at 75 C and 16 W, fans at
+maximum, AC on, and came 3 minutes after the event. The guard does not prevent the
+cut on this model; package temperature and power are not the trigger. It stays
+available as a way to cap the CPU, but it is not a fix.
 
 ## Limits
 
